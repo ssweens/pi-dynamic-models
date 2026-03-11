@@ -6,6 +6,8 @@ pi install @ssweens/pi-dynamic-models
 
 Dynamic model discovery for [pi](https://github.com/badlogic/pi-mono). Point it at any OpenAI-compatible, Anthropic, or Google API server and it fetches available models at startup — no manual model list needed.
 
+![pi-dynamic-models selector](screenshot.png)
+
 ## Setup
 
 ### 1. Install the package
