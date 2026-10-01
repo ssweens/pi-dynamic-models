@@ -9,8 +9,10 @@
     "check": "echo 'nothing to check'"
   },
   "peerDependencies": {
-    "@mariozechner/pi-ai": "*",
-    "@mariozechner/pi-coding-agent": "*"
+    "@earendil-works/pi-coding-agent": ">=0.99.1 <0.100.0"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.99.1"
   },
   "pi": {
     "extensions": ["./index.ts"]

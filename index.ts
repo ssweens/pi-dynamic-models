@@ -48,8 +48,8 @@
  * unreachable /models endpoint are skipped entirely.
  */
 
-import { getAgentDir } from "@mariozechner/pi-coding-agent";
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { execSync } from "node:child_process";
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
@@ -86,7 +86,7 @@ function resolveConfiguredApiKey(apiKey?: string): string | undefined {
   return process.env[apiKey] ?? apiKey;
 }
 
-// Mirrors OpenAICompletionsCompat from @mariozechner/pi-ai
+// Mirrors OpenAICompletionsCompat from @earendil-works/pi-ai
 interface OpenAICompat {
   supportsStore?: boolean;
   supportsDeveloperRole?: boolean;
