@@ -48,14 +48,30 @@
  * unreachable /models endpoint are skipped entirely.
  */
 
-import { openrouterImagesApi } from "@earendil-works/pi-ai/api/openrouter-images.lazy";
-import { typesafeSystemOneApi } from "@earendil-works/pi-ai/api/typesafe-system-one.lazy";
 import type { AnyModel } from "@earendil-works/pi-ai";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { execSync } from "node:child_process";
 import { readFileSync, existsSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+
+// Pi aliases the AI root to a compat file. Resolve that root, then its published API export;
+// unresolved subpaths would be appended to the filename. This works in Node and Bun.
+let aiDirectory = dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-ai")));
+let aiPackage: { name?: string; exports?: Record<string, { import: string }> };
+for (;;) {
+  const manifest = join(aiDirectory, "package.json");
+  aiPackage = existsSync(manifest) ? JSON.parse(readFileSync(manifest, "utf8")) : {};
+  if (aiPackage.name === "@earendil-works/pi-ai") break;
+  const parent = dirname(aiDirectory);
+  if (parent === aiDirectory) throw new Error("Cannot resolve pi-ai provider API exports.");
+  aiDirectory = parent;
+}
+const apiExport = aiPackage.exports!["./api/*"].import;
+const apiUrl = (name: string) => new URL(apiExport.replace("*", name), pathToFileURL(join(aiDirectory, "package.json"))).href;
+const { openrouterImagesApi } = await import(apiUrl("openrouter-images.lazy"));
+const { typesafeSystemOneApi } = await import(apiUrl("typesafe-system-one.lazy"));
 
 function truncatePlain(text: string, width: number): string {
   if (width <= 0) return "";
