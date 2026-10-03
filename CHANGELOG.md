@@ -3,6 +3,10 @@
 All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
+### Added
+- Preserved OpenRouter-style architecture modalities during dynamic discovery and registered `text` as chat, `image` as an image operation when its API is configured, and `decisions` as a Pi classifier through TypeSafe System One.
+- Direct OpenRouter discovery now queries the default, image, and decision catalogs; unsupported modality-only models are not mislabeled as chat.
+
 ### Fixed
 - Added configurable model-source support so providers can fetch models from arbitrary catalog endpoints with JSON paths for item arrays and model ids/names.
 - Added ClinePass support via `https://api.cline.bot/api/v1/ai/cline/recommended-models` and `clinePass` item-path mapping.

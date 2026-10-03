@@ -67,8 +67,9 @@ Create `~/.pi/agent/settings/pi-dynamic-models.json`:
 | `baseUrl` | ✓ | Server URL, including `/v1` if needed |
 | `api` | | Pi API type (default: `openai-completions`). See below. |
 | `apiKey` | | Literal key, env var name, `$ENV_VAR`, or `!shell-command`. Omit for open servers. |
-| `compat` | | OpenAI compat overrides applied to every model. See below. |
-| `modelsSource` | | Optional model catalog endpoint + JSON paths (`url`, `itemsPath`, `idPath`, `namePath`). Defaults to GET `{baseUrl}/models` and `data` when omitted; top-level arrays work by omitting `itemsPath` or setting it to `""`. |
+| `compat` | | OpenAI compat overrides applied to every chat model. See below. |
+| `imageApi` | | Image-generation API implementation. Set to `openrouter-images` only when the endpoint accepts OpenRouter's chat-completions image format. OpenRouter URLs enable it automatically. |
+| `modelsSource` | | Optional model catalog endpoint + JSON paths (`url`, `itemsPath`, `idPath`, `namePath`). Defaults to GET `{baseUrl}/models` and `data` when omitted; architecture metadata is read from each model's `architecture` object. |
 | `models` | | Per-model metadata keyed by model ID. Overrides defaults for discovered models. Models listed here but not returned by the server are still registered. |
 
 #### `models` override fields (all optional)
@@ -80,8 +81,33 @@ Create `~/.pi/agent/settings/pi-dynamic-models.json`:
 | `input` | `["text"]` \| `["text","image"]` | `["text"]` |
 | `contextWindow` | number | `128000` |
 | `maxTokens` | number | `16384` |
+| `architecture.input_modalities` | string[] | From catalog metadata; supported values map to Pi's `input` field. |
+| `architecture.output_modalities` | string[] | From catalog metadata; selects chat, image, and classifier registrations. |
+| `imageApi` | `"openrouter-images"` | Inherits the provider setting; otherwise the image operation is not registered. |
 
 If the server is unreachable at startup, only models explicitly listed in `models` are registered.
+
+### OpenRouter modality metadata
+
+The extension reads `architecture.input_modalities` and
+`architecture.output_modalities` from OpenRouter-style model records. A normal
+text catalog without `architecture` keeps the legacy chat behavior. Explicit
+outputs map to Pi operations: `text` → chat, `image` → image, and
+`decisions` → classifier through Pi's TypeSafe System One handler. One model
+may register multiple operations under the same ID.
+
+For a direct `openrouter.ai` base URL, discovery fetches the normal model list
+plus `output_modalities=image` and `output_modalities=decisions`; those
+operation-only models are absent from the default listing. A custom
+`modelsSource` is used as-is, so include the architecture fields or query
+`output_modalities=all` there.
+
+Pi has no audio, embedding, rerank, transcription, or video model operation.
+Those outputs are not registered as chat. Non-OpenRouter image endpoints must
+set `imageApi: "openrouter-images"` only if they accept OpenRouter's
+`/chat/completions` image request format; otherwise the image model is omitted
+and the startup widget says why. Unsupported input modalities are likewise not
+advertised as Pi text/image inputs.
 
 ### Supported API types
 
@@ -113,7 +139,7 @@ Any Pi `KnownApi` value:
 
 ## Overriding model metadata
 
-Discovered models use conservative defaults (`contextWindow: 128000`, `maxTokens: 16384`, `reasoning: false`, `input: ["text"]`). Override them directly in the config file using the `models` dict:
+Discovered models use conservative defaults (`contextWindow: 128000`, `maxTokens: 16384`, `reasoning: false`, `input: ["text"]`). Override them directly in the config file using the `models` dict. Use the same snake-case `architecture` keys as OpenRouter:
 
 ```json
 {
@@ -126,6 +152,22 @@ Discovered models use conservative defaults (`contextWindow: 128000`, `maxTokens
       "input": ["text", "image"],
       "contextWindow": 200000,
       "maxTokens": 32000
+    }
+  }
+}
+```
+
+For a catalog that does not expose modality metadata, an explicit classifier
+override can use the same OpenRouter field names:
+
+```json
+{
+  "models": {
+    "jev-model": {
+      "architecture": {
+        "input_modalities": ["text"],
+        "output_modalities": ["decisions"]
+      }
     }
   }
 }
