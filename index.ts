@@ -571,18 +571,57 @@ export function buildOperationHandlers(models: AnyModel[]) {
   };
 }
 
+interface StartupSummary {
+  unavailableSources: number;
+  configuredFallbackProviders: number;
+  skippedProviders: number;
+  emptyProviders: number;
+  unsupportedModels: number;
+  skippedImageModels: number;
+}
+
+export function formatStartupSummary(summary: StartupSummary): string[] {
+  const lines: string[] = [];
+  const discovery: string[] = [];
+  if (summary.unavailableSources > 0) {
+    discovery.push(`unavailable model sources: ${summary.unavailableSources}`);
+    if (summary.configuredFallbackProviders > 0) {
+      discovery.push(`configured fallback providers: ${summary.configuredFallbackProviders}`);
+    }
+    if (summary.skippedProviders > 0) discovery.push(`skipped providers: ${summary.skippedProviders}`);
+  }
+  if (discovery.length > 0) lines.push(`[pi-dynamic-models] ${discovery.join("; ")}`);
+
+  if (summary.emptyProviders > 0) {
+    lines.push(`[pi-dynamic-models] Providers with no models: ${summary.emptyProviders}`);
+  }
+  const unsupported: string[] = [];
+  if (summary.unsupportedModels > 0) unsupported.push(`unsupported models: ${summary.unsupportedModels}`);
+  if (summary.skippedImageModels > 0) {
+    unsupported.push(`images requiring imageApi "openrouter-images": ${summary.skippedImageModels}`);
+  }
+  if (unsupported.length > 0) lines.push(`[pi-dynamic-models] ${unsupported.join("; ")}`);
+  return lines;
+}
+
 export default async function (pi: ExtensionAPI): Promise<void> {
   const servers = loadConfig();
   if (servers.length === 0) return;
 
-  const startupLines: string[] = [];
+  const startupSummary: StartupSummary = {
+    unavailableSources: 0,
+    configuredFallbackProviders: 0,
+    skippedProviders: 0,
+    emptyProviders: 0,
+    unsupportedModels: 0,
+    skippedImageModels: 0,
+  };
 
   await Promise.all(
     servers.map(async ({ provider, baseUrl, apiKey, api, compat, imageApi, modelsSource, models: modelOverrides }) => {
       const resolvedApiKey = resolveConfiguredApiKey(apiKey);
       const normalizedBaseUrl = baseUrl.replace(/\/+$/, "");
       const sources = buildModelSources(normalizedBaseUrl, modelsSource);
-      const sourceLabel = sources.map((source) => source.url).join(", ");
       const registrationApiKey = resolvedApiKey ?? apiKey ?? "none";
       const useAuthHeader = Boolean(resolvedApiKey);
 
@@ -592,12 +631,13 @@ export default async function (pi: ExtensionAPI): Promise<void> {
       try {
         const discovery = await fetchModelsFromSources(sources, resolvedApiKey);
         fetchedModels = discovery.models;
-        startupLines.push(...discovery.warnings.map((warning) => `   [pi-dynamic-models] ${warning}`));
-      } catch (err) {
+        startupSummary.unavailableSources += discovery.warnings.length;
+      } catch {
+        startupSummary.unavailableSources += sources.length;
         if (modelOverrides && Object.keys(modelOverrides).length > 0) {
-          startupLines.push(`   [pi-dynamic-models] Could not reach model sources ${sourceLabel} (${err}), using configured models only`);
+          startupSummary.configuredFallbackProviders++;
         } else {
-          startupLines.push(`   [pi-dynamic-models] Could not reach model sources ${sourceLabel}: ${err}`);
+          startupSummary.skippedProviders++;
           return;
         }
       }
@@ -613,7 +653,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
       const allIds = new Set<string>([...fetchedModels.map((m) => m.id), ...Object.keys(modelOverrides ?? {})]);
 
       if (allIds.size === 0) {
-        startupLines.push(`   [pi-dynamic-models] No models for provider "${provider}"`);
+        startupSummary.emptyProviders++;
         return;
       }
 
@@ -632,16 +672,8 @@ export default async function (pi: ExtensionAPI): Promise<void> {
       });
 
       if (registration.models.length === 0) {
-        startupLines.push(`   [pi-dynamic-models] Provider "${provider}": no Pi-supported model operations (${allIds.size} IDs discovered/configured)`);
-        if (registration.skippedImageModels > 0) {
-          startupLines.push(`   [pi-dynamic-models] ${registration.skippedImageModels} image model(s) require imageApi "openrouter-images"`);
-        }
-        if (registration.unsupportedInputModalities.length > 0) {
-          startupLines.push(`   [pi-dynamic-models] Unsupported input modalities not available to Pi: ${registration.unsupportedInputModalities.join(", ")}`);
-        }
-        if (registration.unsupportedOutputModalities.length > 0) {
-          startupLines.push(`   [pi-dynamic-models] Unsupported output modalities not registered: ${registration.unsupportedOutputModalities.join(", ")}`);
-        }
+        startupSummary.unsupportedModels += registration.unsupportedModels;
+        startupSummary.skippedImageModels += registration.skippedImageModels;
         return;
       }
 
@@ -655,32 +687,13 @@ export default async function (pi: ExtensionAPI): Promise<void> {
         ...buildOperationHandlers(registration.models),
       });
 
-      const fetchedNote = fetchedModels.length > 0 ? `${fetchedModels.length} discovered` : "0 discovered";
-      const overrideNote = Object.keys(modelOverrides ?? {}).length > 0
-        ? `, ${Object.keys(modelOverrides!).length} configured`
-        : "";
-      const sourceNote = modelsSource?.url
-        ? ` via ${modelsSource.url}`
-        : sources.length > 1 ? " via /models + image/decisions listings" : " via /models";
-      startupLines.push(
-        `   [pi-dynamic-models] Provider "${provider}": ${fetchedNote}${overrideNote}, ${allIds.size} IDs / ${registration.models.length} operations (${api ?? "openai-completions"})${sourceNote}`
-      );
-      if (registration.unsupportedModels > 0) {
-        startupLines.push(`   [pi-dynamic-models] ${registration.unsupportedModels} model(s) have no supported Pi operation; not registered as chat`);
-      }
-      if (registration.skippedImageModels > 0) {
-        startupLines.push(`   [pi-dynamic-models] ${registration.skippedImageModels} image model(s) require imageApi "openrouter-images"`);
-      }
-      if (registration.unsupportedInputModalities.length > 0) {
-        startupLines.push(`   [pi-dynamic-models] Unsupported input modalities not available to Pi: ${registration.unsupportedInputModalities.join(", ")}`);
-      }
-      if (registration.unsupportedOutputModalities.length > 0) {
-        startupLines.push(`   [pi-dynamic-models] Unsupported output modalities not registered: ${registration.unsupportedOutputModalities.join(", ")}`);
-      }
+      startupSummary.unsupportedModels += registration.unsupportedModels;
+      startupSummary.skippedImageModels += registration.skippedImageModels;
     })
   );
 
-  // Show startup info as a widget that clears on first user input
+  // Show only actionable startup issues; routine provider/model summaries stay quiet.
+  const startupLines = formatStartupSummary(startupSummary);
   if (startupLines.length > 0) {
     pi.on("session_start", async (_event, ctx) => {
       ctx.ui.setWidget("pi-dynamic-models-startup", (_tui, theme) => ({

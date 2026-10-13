@@ -5,6 +5,7 @@ import {
   buildModelSources,
   buildOperationHandlers,
   fetchModelsFromSources,
+  formatStartupSummary,
   resolveImageApi,
 } from "./index.ts";
 
@@ -40,6 +41,33 @@ function buildEntries(
     corralDetails: emptyCorralDetails(),
   });
 }
+
+describe("startup summary", () => {
+  test("stays quiet when registration has no issues", () => {
+    expect(formatStartupSummary({
+      unavailableSources: 0,
+      configuredFallbackProviders: 0,
+      skippedProviders: 0,
+      emptyProviders: 0,
+      unsupportedModels: 0,
+      skippedImageModels: 0,
+    })).toEqual([]);
+  });
+
+  test("aggregates startup issues into one concise line", () => {
+    expect(formatStartupSummary({
+      unavailableSources: 3,
+      configuredFallbackProviders: 1,
+      skippedProviders: 1,
+      emptyProviders: 0,
+      unsupportedModels: 3,
+      skippedImageModels: 1,
+    })).toEqual([
+      '[pi-dynamic-models] unavailable model sources: 3; configured fallback providers: 1; skipped providers: 1',
+      '[pi-dynamic-models] unsupported models: 3; images requiring imageApi "openrouter-images": 1',
+    ]);
+  });
+});
 
 describe("OpenRouter modality discovery", () => {
   test("legacy catalogs keep registering as text chat", () => {
