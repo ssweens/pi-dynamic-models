@@ -4,7 +4,7 @@
 pi install @ssweens/pi-dynamic-models
 ```
 
-Dynamic model discovery for [pi](https://github.com/badlogic/pi-mono). Point it at any OpenAI-compatible API server or model-catalog endpoint and it fetches available models at startup — no manual model list needed.
+Dynamic model discovery for [pi](https://github.com/badlogic/pi-mono). Point it at any OpenAI-compatible API server or model-catalog endpoint. Pi starts without waiting for discovery; configured models register immediately, and each provider's catalog hydrates as its response arrives.
 
 ![pi-dynamic-models selector](screenshot.png)
 
@@ -85,7 +85,7 @@ Create `~/.pi/agent/settings/pi-dynamic-models.json`:
 | `architecture.output_modalities` | string[] | From catalog metadata; selects chat, image, and classifier registrations. |
 | `imageApi` | `"openrouter-images"` | Inherits the provider setting; otherwise the image operation is not registered. |
 
-If the server is unreachable at startup, only models explicitly listed in `models` are registered.
+Explicit `models` register immediately. Catalog discovery runs in the background after the session starts; if a source fails, configured models remain available and providers without fallbacks are skipped.
 
 ### OpenRouter modality metadata
 
@@ -179,7 +179,7 @@ override can use the same OpenRouter field names:
 
 **Wrong API behavior**: Set the correct `api` field for your server type.
 
-**API key not resolving**: `apiKey` is resolved before the provider is registered. Raw env var names like `CLINE_API_KEY` work, and `$CLINE_API_KEY` / `${CLINE_API_KEY}` are also supported.
+**API key not resolving**: `apiKey` is resolved before discovery requests. Raw env var names like `CLINE_API_KEY` work, and `$CLINE_API_KEY` / `${CLINE_API_KEY}` are also supported. A `!shell-command` runs asynchronously; that provider's fallback models register when the command finishes.
 
 **Custom catalog not loading**: Set `modelsSource.url` to the catalog endpoint and `modelsSource.itemsPath` to the array field (for ClinePass, `clinePass`).
 

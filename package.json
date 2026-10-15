@@ -1,7 +1,7 @@
 {
   "name": "@ssweens/pi-dynamic-models",
   "version": "1.0.2",
-  "description": "Dynamic model discovery for Pi coding agent — fetches models from any configured API server at startup",
+  "description": "Dynamic model discovery for Pi coding agent — hydrates providers asynchronously from configured API servers",
   "type": "module",
   "scripts": {
     "clean": "echo 'nothing to clean'",

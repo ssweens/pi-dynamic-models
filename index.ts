@@ -2,7 +2,7 @@
  * pi-dynamic-models — Dynamic model discovery for Pi coding agent
  *
  * Reads ~/.pi/agent/settings/pi-dynamic-models.json and registers each configured
- * server as a named provider by fetching a configurable model source at startup.
+ * server as a named provider. Catalog discovery starts after session start and runs in the background.
  *
  * Config file (~/.pi/agent/settings/pi-dynamic-models.json):
  *
@@ -43,18 +43,18 @@
  *   3. Register text as chat, image through its configured API, and decisions as System One classifiers.
  *      Unsupported output types are never silently registered as chat.
  *
- * Servers that are unreachable at startup fall back to only the explicitly
- * configured models (if any). Servers with no configured models and an
- * unreachable /models endpoint are skipped entirely.
+ * Explicit models register before discovery. Unreachable sources leave those
+ * fallbacks available; providers without configured models are skipped.
  */
 
 import type { AnyModel } from "@earendil-works/pi-ai";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { execSync } from "node:child_process";
+import type { ExtensionAPI, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
+import { exec } from "node:child_process";
 import { readFileSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { promisify } from "node:util";
 
 // Pi aliases the AI root to a compat file. Resolve that root, then its published API export;
 // unresolved subpaths would be appended to the filename. This works in Node and Bun.
@@ -80,21 +80,10 @@ function truncatePlain(text: string, width: number): string {
   return `${text.slice(0, width - 1)}…`;
 }
 
-function resolveConfiguredApiKey(apiKey?: string): string | undefined {
-  if (!apiKey || apiKey === "none") return undefined;
+const execAsync = promisify(exec);
 
-  if (apiKey.startsWith("!")) {
-    try {
-      const resolved = execSync(apiKey.slice(1), {
-        encoding: "utf-8",
-        timeout: 10_000,
-        stdio: ["ignore", "pipe", "ignore"],
-      }).trim();
-      return resolved || undefined;
-    } catch {
-      return undefined;
-    }
-  }
+function resolveStaticApiKey(apiKey?: string): string | undefined {
+  if (!apiKey || apiKey === "none" || apiKey.startsWith("!")) return undefined;
 
   const templateMatch = apiKey.match(/^\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))$/);
   if (templateMatch) {
@@ -103,6 +92,31 @@ function resolveConfiguredApiKey(apiKey?: string): string | undefined {
   }
 
   return process.env[apiKey] ?? apiKey;
+}
+
+async function resolveConfiguredApiKey(apiKey?: string, signal?: AbortSignal): Promise<string | undefined> {
+  if (!apiKey || apiKey === "none") return undefined;
+
+  if (apiKey.startsWith("!")) {
+    try {
+      const { stdout } = await execAsync(apiKey.slice(1), {
+        encoding: "utf8",
+        timeout: 10_000,
+        signal,
+      });
+      return stdout.trim() || undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  return resolveStaticApiKey(apiKey);
+}
+
+function requestSignal(signal: AbortSignal | undefined, timeoutMs: number): AbortSignal {
+  return signal
+    ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)])
+    : AbortSignal.timeout(timeoutMs);
 }
 
 // Mirrors OpenAICompletionsCompat from @earendil-works/pi-ai
@@ -322,6 +336,8 @@ export function buildModelSources(baseUrl: string, configured?: ModelSourceConfi
 async function fetchCorralModelDetails(
   baseUrl: string,
   apiKey?: string,
+  signal?: AbortSignal,
+  fetcher: typeof fetch = fetch,
 ): Promise<Map<string, CorralModelDetail>> {
   const normalized = baseUrl.replace(/\/+$/, "");
   const rootCandidate = normalized.replace(/\/v\d+(?:\.\d+)?$/, "");
@@ -335,13 +351,14 @@ async function fetchCorralModelDetails(
 
   for (const url of candidateUrls) {
     try {
-      const response = await fetch(url, { headers, signal: AbortSignal.timeout(5000) });
+      const response = await fetcher(url, { headers, signal: requestSignal(signal, 5000) });
       if (!response.ok) continue;
       const body = (await response.json()) as CorralModelsResponse;
       const map = new Map<string, CorralModelDetail>();
       for (const m of body.data ?? []) map.set(m.id, m);
       return map;
     } catch {
+      if (signal?.aborted) return new Map();
       // try next candidate URL
     }
   }
@@ -353,6 +370,7 @@ async function fetchModelsFromSource(
   source: ModelSourceConfig,
   apiKey?: string,
   fetcher: typeof fetch = fetch,
+  signal?: AbortSignal,
 ): Promise<DiscoveredModel[]> {
   const url = source.url.trim();
   if (!url) {
@@ -366,7 +384,7 @@ async function fetchModelsFromSource(
 
   const response = await fetcher(url, {
     headers,
-    signal: AbortSignal.timeout(8000),
+    signal: requestSignal(signal, 8000),
   });
 
   if (!response.ok) {
@@ -395,10 +413,11 @@ export async function fetchModelsFromSources(
   sources: ModelSourceConfig[],
   apiKey?: string,
   fetcher: typeof fetch = fetch,
+  signal?: AbortSignal,
 ): Promise<{ models: DiscoveredModel[]; warnings: string[] }> {
   const results = await Promise.all(sources.map(async (source) => {
     try {
-      return { source, models: await fetchModelsFromSource(source, apiKey, fetcher) };
+      return { source, models: await fetchModelsFromSource(source, apiKey, fetcher, signal) };
     } catch (error) {
       return { source, error };
     }
@@ -604,11 +623,8 @@ export function formatStartupSummary(summary: StartupSummary): string[] {
   return lines;
 }
 
-export default async function (pi: ExtensionAPI): Promise<void> {
-  const servers = loadConfig();
-  if (servers.length === 0) return;
-
-  const startupSummary: StartupSummary = {
+function createStartupSummary(): StartupSummary {
+  return {
     unavailableSources: 0,
     configuredFallbackProviders: 0,
     skippedProviders: 0,
@@ -616,96 +632,158 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     unsupportedModels: 0,
     skippedImageModels: 0,
   };
+}
 
-  await Promise.all(
-    servers.map(async ({ provider, baseUrl, apiKey, api, compat, imageApi, modelsSource, models: modelOverrides }) => {
-      const resolvedApiKey = resolveConfiguredApiKey(apiKey);
-      const normalizedBaseUrl = baseUrl.replace(/\/+$/, "");
-      const sources = buildModelSources(normalizedBaseUrl, modelsSource);
-      const registrationApiKey = resolvedApiKey ?? apiKey ?? "none";
-      const useAuthHeader = Boolean(resolvedApiKey);
+interface DiscoveryRun {
+  controller: AbortController;
+  ui: ExtensionUIContext;
+  dismissed: boolean;
+  summary: StartupSummary;
+}
 
-      // Fetch source metadata first; Corral context metadata remains additive.
-      // If every source fetch fails but explicit models exist, keep those.
-      let fetchedModels: DiscoveredModel[] = [];
-      try {
-        const discovery = await fetchModelsFromSources(sources, resolvedApiKey);
-        fetchedModels = discovery.models;
-        startupSummary.unavailableSources += discovery.warnings.length;
-      } catch {
-        startupSummary.unavailableSources += sources.length;
-        if (modelOverrides && Object.keys(modelOverrides).length > 0) {
-          startupSummary.configuredFallbackProviders++;
-        } else {
-          startupSummary.skippedProviders++;
-          return;
-        }
-      }
-
-      let corralDetails = new Map<string, CorralModelDetail>();
-      try {
-        corralDetails = await fetchCorralModelDetails(baseUrl, resolvedApiKey);
-      } catch {
-        // Optional metadata only.
-      }
-
-      // Union of fetched IDs and explicitly configured IDs
-      const allIds = new Set<string>([...fetchedModels.map((m) => m.id), ...Object.keys(modelOverrides ?? {})]);
-
-      if (allIds.size === 0) {
-        startupSummary.emptyProviders++;
-        return;
-      }
-
-      const discoveredById = new Map(fetchedModels.map((model) => [model.id, model]));
-      const modelIds = Array.from(allIds).sort((a, b) => a.localeCompare(b));
-      const registration = buildModelEntries({
-        ids: modelIds,
-        provider,
-        baseUrl: normalizedBaseUrl,
-        api: api ?? "openai-completions",
-        imageApi: resolveImageApi(normalizedBaseUrl, imageApi),
-        compat,
-        discoveredById,
-        overrides: modelOverrides,
-        corralDetails,
-      });
-
-      if (registration.models.length === 0) {
-        startupSummary.unsupportedModels += registration.unsupportedModels;
-        startupSummary.skippedImageModels += registration.skippedImageModels;
-        return;
-      }
-
-      pi.registerProvider(provider, {
-        baseUrl: normalizedBaseUrl,
-        // Supports literal keys, env var names, $ENV_VAR references, and !shell-commands.
-        apiKey: registrationApiKey,
-        authHeader: useAuthHeader,
-        api: api ?? "openai-completions",
-        models: registration.models,
-        ...buildOperationHandlers(registration.models),
-      });
-
-      startupSummary.unsupportedModels += registration.unsupportedModels;
-      startupSummary.skippedImageModels += registration.skippedImageModels;
-    })
-  );
-
-  // Show only actionable startup issues; routine provider/model summaries stay quiet.
-  const startupLines = formatStartupSummary(startupSummary);
-  if (startupLines.length > 0) {
-    pi.on("session_start", async (_event, ctx) => {
-      ctx.ui.setWidget("pi-dynamic-models-startup", (_tui, theme) => ({
+function updateStartupWidget(run: DiscoveryRun): void {
+  const lines = formatStartupSummary(run.summary);
+  run.ui.setWidget(
+    "pi-dynamic-models-startup",
+    !run.dismissed && lines.length > 0
+      ? (_tui, theme) => ({
         render: (width: number) => [
-          ...startupLines.map((line) => theme.fg("muted", truncatePlain(line, width))),
+          ...lines.map((line) => theme.fg("muted", truncatePlain(line, width))),
           "",
         ],
         invalidate: () => {},
-      }));
-    });
-    pi.on("input", async (_event, ctx) => {
-      ctx.ui.setWidget("pi-dynamic-models-startup", undefined);
+      })
+      : undefined,
+  );
+}
+
+function registerProviderModels(
+  pi: ExtensionAPI,
+  server: ServerConfig,
+  apiKey: string | undefined,
+  fetchedModels: DiscoveredModel[],
+  corralDetails: ReadonlyMap<string, CorralModelDetail>,
+) {
+  const normalizedBaseUrl = server.baseUrl.replace(/\/+$/u, "");
+  const modelIds = Array.from(new Set([
+    ...fetchedModels.map((model) => model.id),
+    ...Object.keys(server.models ?? {}),
+  ])).sort((a, b) => a.localeCompare(b));
+  const registration = buildModelEntries({
+    ids: modelIds,
+    provider: server.provider,
+    baseUrl: normalizedBaseUrl,
+    api: server.api ?? "openai-completions",
+    imageApi: resolveImageApi(normalizedBaseUrl, server.imageApi),
+    compat: server.compat,
+    discoveredById: new Map(fetchedModels.map((model) => [model.id, model])),
+    overrides: server.models,
+    corralDetails,
+  });
+
+  if (registration.models.length > 0) {
+    pi.registerProvider(server.provider, {
+      baseUrl: normalizedBaseUrl,
+      // Supports literal keys, env var names, $ENV_VAR references, and !shell-commands.
+      apiKey: apiKey ?? server.apiKey ?? "none",
+      authHeader: Boolean(apiKey),
+      api: server.api ?? "openai-completions",
+      models: registration.models,
+      ...buildOperationHandlers(registration.models),
     });
   }
+  return registration;
+}
+
+async function hydrateProvider(pi: ExtensionAPI, server: ServerConfig, run: DiscoveryRun): Promise<void> {
+  const { signal } = run.controller;
+  const resolvedApiKey = await resolveConfiguredApiKey(server.apiKey, signal);
+  if (signal.aborted) return;
+
+  // Shell-based keys need an async process, so register their fallback models once it resolves.
+  if (server.apiKey?.startsWith("!") && Object.keys(server.models ?? {}).length > 0) {
+    registerProviderModels(pi, server, resolvedApiKey, [], new Map());
+  }
+
+  const normalizedBaseUrl = server.baseUrl.replace(/\/+$/u, "");
+  const sources = buildModelSources(normalizedBaseUrl, server.modelsSource);
+  let fetchedModels: DiscoveredModel[] = [];
+  try {
+    const discovery = await fetchModelsFromSources(sources, resolvedApiKey, fetch, signal);
+    fetchedModels = discovery.models;
+    run.summary.unavailableSources += discovery.warnings.length;
+  } catch {
+    if (signal.aborted) return;
+    run.summary.unavailableSources += sources.length;
+    if (Object.keys(server.models ?? {}).length > 0) {
+      run.summary.configuredFallbackProviders++;
+    } else {
+      run.summary.skippedProviders++;
+      updateStartupWidget(run);
+      return;
+    }
+  }
+
+  if (signal.aborted) return;
+  const modelIds = new Set([...fetchedModels.map((model) => model.id), ...Object.keys(server.models ?? {})]);
+  if (modelIds.size === 0) {
+    run.summary.emptyProviders++;
+    updateStartupWidget(run);
+    return;
+  }
+
+  // Publish each provider as soon as its catalog arrives; context sizes follow separately.
+  const registration = registerProviderModels(pi, server, resolvedApiKey, fetchedModels, new Map());
+  run.summary.unsupportedModels += registration.unsupportedModels;
+  run.summary.skippedImageModels += registration.skippedImageModels;
+  updateStartupWidget(run);
+  if (registration.models.length === 0) return;
+
+  const corralDetails = await fetchCorralModelDetails(server.baseUrl, resolvedApiKey, signal);
+  if (signal.aborted || corralDetails.size === 0) return;
+  registerProviderModels(pi, server, resolvedApiKey, fetchedModels, corralDetails);
+}
+
+export default function (pi: ExtensionAPI): void {
+  const servers = loadConfig();
+  if (servers.length === 0) return;
+
+  // Explicit models stay available immediately without waiting for any network calls.
+  for (const server of servers) {
+    if (server.apiKey?.startsWith("!")) continue;
+    if (Object.keys(server.models ?? {}).length === 0) continue;
+    registerProviderModels(pi, server, resolveStaticApiKey(server.apiKey), [], new Map());
+  }
+
+  let currentRun: DiscoveryRun | undefined;
+  pi.on("session_start", (_event, ctx) => {
+    currentRun?.controller.abort();
+    const run: DiscoveryRun = {
+      controller: new AbortController(),
+      ui: ctx.ui,
+      dismissed: false,
+      summary: createStartupSummary(),
+    };
+    currentRun = run;
+    updateStartupWidget(run);
+
+    // Do not return or await this work: providers hydrate independently as discovery completes.
+    for (const server of servers) {
+      void hydrateProvider(pi, server, run).catch((error) => {
+        if (!run.controller.signal.aborted) {
+          console.error(`[pi-dynamic-models] Failed to hydrate ${server.provider}: ${error}`);
+        }
+      });
+    }
+  });
+
+  pi.on("session_shutdown", () => {
+    currentRun?.controller.abort();
+    currentRun = undefined;
+  });
+
+  pi.on("input", (_event, ctx) => {
+    if (currentRun) currentRun.dismissed = true;
+    ctx.ui.setWidget("pi-dynamic-models-startup", undefined);
+  });
 }

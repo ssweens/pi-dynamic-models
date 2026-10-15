@@ -1,6 +1,10 @@
-import { createModels } from "@earendil-works/pi-ai";
+import { createModels, type AnyModel } from "@earendil-works/pi-ai";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { describe, expect, test } from "bun:test";
-import {
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import dynamicModels, {
   buildModelEntries,
   buildModelSources,
   buildOperationHandlers,
@@ -66,6 +70,105 @@ describe("startup summary", () => {
       '[pi-dynamic-models] unavailable model sources: 3; configured fallback providers: 1; skipped providers: 1',
       '[pi-dynamic-models] unsupported models: 3; images requiring imageApi "openrouter-images": 1',
     ]);
+  });
+});
+
+describe("background provider hydration", () => {
+  test("returns from load immediately and registers each provider as discovery completes", async () => {
+    const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+    const originalFetch = globalThis.fetch;
+    const configDir = mkdtempSync(join(tmpdir(), "pi-dynamic-models-"));
+    const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
+    const registrations: Array<{ provider: string; models: AnyModel[] }> = [];
+    let fetchCount = 0;
+    let resolveFastHydrated!: () => void;
+    const fastHydrated = new Promise<void>((resolve) => {
+      resolveFastHydrated = resolve;
+    });
+    const fakePi = {
+      on(event: string, handler: (event: unknown, ctx: unknown) => unknown) {
+        handlers.set(event, handler);
+        return () => {};
+      },
+      registerProvider(provider: string, config: { models: AnyModel[] }) {
+        registrations.push({ provider, models: config.models });
+        if (provider === "fast" && config.models.some((model) => model.id === "from-catalog")) {
+          resolveFastHydrated();
+        }
+      },
+    } as unknown as ExtensionAPI;
+
+    const jsonResponse = (body: unknown) => new Response(JSON.stringify(body), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+
+    try {
+      process.env.PI_CODING_AGENT_DIR = configDir;
+      mkdirSync(join(configDir, "settings"), { recursive: true });
+      writeFileSync(join(configDir, "settings", "pi-dynamic-models.json"), JSON.stringify([
+        {
+          provider: "fast",
+          baseUrl: "http://fast.test/v1",
+          apiKey: "none",
+          models: { manual: { contextWindow: 64_000 } },
+        },
+        {
+          provider: "slow",
+          baseUrl: "http://slow.test/v1",
+          apiKey: "none",
+        },
+      ]));
+      globalThis.fetch = (async (input, init) => {
+        fetchCount++;
+        const url = new URL(String(input));
+        if (url.hostname === "slow.test") {
+          return new Promise<Response>((_resolve, reject) => {
+            const signal = init?.signal;
+            if (signal?.aborted) reject(signal.reason);
+            else signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+          });
+        }
+        if (url.pathname.endsWith("/corral/models")) return jsonResponse({ data: [] });
+        return jsonResponse({ data: [{ id: "from-catalog" }] });
+      }) as typeof fetch;
+
+      expect(dynamicModels(fakePi)).toBeUndefined();
+      expect(fetchCount).toBe(0);
+      expect(registrations.map(({ provider }) => provider)).toEqual(["fast"]);
+      expect(registrations[0].models.map((model) => model.id)).toEqual(["manual"]);
+
+      const ui = { setWidget: () => {} };
+      const start = handlers.get("session_start");
+      expect(start).toBeDefined();
+      expect(start?.({ type: "session_start", reason: "startup" }, { ui })).toBeUndefined();
+      expect(fetchCount).toBe(0);
+
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          fastHydrated,
+          new Promise<never>((_resolve, reject) => {
+            timeout = setTimeout(() => reject(new Error("fast provider did not hydrate")), 2_000);
+          }),
+        ]);
+      } finally {
+        if (timeout) clearTimeout(timeout);
+      }
+
+      const hydrated = registrations.find(({ provider, models }) =>
+        provider === "fast" && models.some((model) => model.id === "from-catalog")
+      );
+      expect(hydrated?.models.map((model) => model.id)).toEqual(["from-catalog", "manual"]);
+      expect(registrations.some(({ provider }) => provider === "slow")).toBe(false);
+    } finally {
+      handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "quit" }, {});
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+      globalThis.fetch = originalFetch;
+      rmSync(configDir, { recursive: true, force: true });
+    }
   });
 });
 

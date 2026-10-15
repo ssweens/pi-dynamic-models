@@ -3,6 +3,9 @@
 All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
+### Changed
+- Model discovery now starts after session start and never blocks Pi startup. Explicit fallback models register immediately; discovered catalogs and Corral context sizes hydrate providers asynchronously.
+
 ### Added
 - Preserved OpenRouter-style architecture modalities during dynamic discovery and registered `text` as chat, `image` as an image operation when its API is configured, and `decisions` as a Pi classifier through TypeSafe System One.
 - Direct OpenRouter discovery now queries the default, image, and decision catalogs; unsupported modality-only models are not mislabeled as chat.
