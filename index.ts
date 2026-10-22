@@ -51,22 +51,48 @@ import type { AnyModel } from "@earendil-works/pi-ai";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import { exec } from "node:child_process";
-import { readFileSync, existsSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
-// Prefer the active managed Pi release: import.meta.resolve can find a stale Bun-global pi-ai.
+// Locate the active pi-ai package across managed releases, global installs, and Jiti's CJS resolver.
 function resolvePiAiDirectory(): string {
-  const installRoot = process.env.PI_MANAGED_INSTALL_ROOT;
-  const versionFile = installRoot && join(installRoot, "current-version");
-  if (installRoot && versionFile && existsSync(versionFile)) {
+  for (const installRoot of [
+    process.env.PI_MANAGED_INSTALL_ROOT,
+    join(getAgentDir(), "install"),
+    join(homedir(), ".pi", "agent", "install"),
+  ]) {
+    const versionFile = installRoot && join(installRoot, "current-version");
+    if (!installRoot || !versionFile || !existsSync(versionFile)) continue;
     const version = readFileSync(versionFile, "utf8").trim();
     const packageRoot = join(installRoot, "releases", version, "node_modules", "@earendil-works", "pi-ai");
     if (existsSync(join(packageRoot, "package.json"))) return packageRoot;
   }
 
-  return dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-ai")));
+  if (process.argv[1]) {
+    try {
+      let dir = dirname(realpathSync(process.argv[1]));
+      for (;;) {
+        for (const candidate of [join(dir, "node_modules", "@earendil-works", "pi-ai"), join(dir, "ai")]) {
+          if (existsSync(join(candidate, "package.json"))) return candidate;
+        }
+        const parent = dirname(dir);
+        if (parent === dir) break;
+        dir = parent;
+      }
+    } catch {}
+  }
+
+  try {
+    return dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-ai")));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const match = message.match(/No "exports" main defined in (.+)[\\/]package\.json/);
+    if (match && existsSync(join(match[1], "package.json"))) return match[1];
+    throw error;
+  }
 }
 
 let aiDirectory = resolvePiAiDirectory();
@@ -80,9 +106,13 @@ for (;;) {
   aiDirectory = parent;
 }
 const apiExport = aiPackage.exports!["./api/*"].import;
-const apiUrl = (name: string) => new URL(apiExport.replace("*", name), pathToFileURL(join(aiDirectory, "package.json"))).href;
-const { openrouterImagesApi } = await import(apiUrl("openrouter-images.lazy"));
-const { typesafeSystemOneApi } = await import(apiUrl("typesafe-system-one.lazy"));
+const apiUrl = (name: string) => new URL(apiExport.replace("*", name), pathToFileURL(join(aiDirectory, "package.json")));
+const loadOptionalApi = async (name: string) => {
+  const url = apiUrl(name);
+  return existsSync(fileURLToPath(url)) ? import(url.href) : {};
+};
+const { openrouterImagesApi } = await loadOptionalApi("openrouter-images.lazy");
+const { typesafeSystemOneApi } = await loadOptionalApi("typesafe-system-one.lazy");
 
 function truncatePlain(text: string, width: number): string {
   if (width <= 0) return "";
@@ -592,10 +622,10 @@ export function buildModelEntries(options: {
 
 export function buildOperationHandlers(models: AnyModel[]) {
   return {
-    ...(models.some((model) => model.type === "image")
+    ...(openrouterImagesApi && models.some((model) => model.type === "image")
       ? { images: { "openrouter-images": openrouterImagesApi() } }
       : {}),
-    ...(models.some((model) => model.type === "classifier")
+    ...(typesafeSystemOneApi && models.some((model) => model.type === "classifier")
       ? { classifiers: { "typesafe-system-one": typesafeSystemOneApi() } }
       : {}),
   };
