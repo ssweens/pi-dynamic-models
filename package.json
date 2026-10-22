@@ -10,8 +10,8 @@
     "test": "bun test"
   },
   "peerDependencies": {
-    "@earendil-works/pi-ai": ">=0.99.1 <0.100.0",
-    "@earendil-works/pi-coding-agent": ">=0.99.1 <0.100.0"
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*"
   },
   "devDependencies": {
     "@earendil-works/pi-ai": "0.99.1",

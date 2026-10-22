@@ -56,22 +56,17 @@ import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
-// Pi aliases the AI root to a compat file. Resolve that root, then its published API export;
-// unresolved subpaths would be appended to the filename. In Pi's bundled runtime,
-// import.meta.resolve cannot see virtual host modules, so fall back to Pi's managed release.
+// Prefer the active managed Pi release: import.meta.resolve can find a stale Bun-global pi-ai.
 function resolvePiAiDirectory(): string {
-  try {
-    return dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-ai")));
-  } catch (error) {
-    const installRoot = process.env.PI_MANAGED_INSTALL_ROOT;
-    const versionFile = installRoot && join(installRoot, "current-version");
-    if (!installRoot || !versionFile || !existsSync(versionFile)) throw error;
-
+  const installRoot = process.env.PI_MANAGED_INSTALL_ROOT;
+  const versionFile = installRoot && join(installRoot, "current-version");
+  if (installRoot && versionFile && existsSync(versionFile)) {
     const version = readFileSync(versionFile, "utf8").trim();
     const packageRoot = join(installRoot, "releases", version, "node_modules", "@earendil-works", "pi-ai");
-    if (!existsSync(join(packageRoot, "package.json"))) throw error;
-    return packageRoot;
+    if (existsSync(join(packageRoot, "package.json"))) return packageRoot;
   }
+
+  return dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-ai")));
 }
 
 let aiDirectory = resolvePiAiDirectory();
