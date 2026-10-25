@@ -33,6 +33,7 @@ Create `~/.pi/agent/settings/pi-dynamic-models.json`:
     "baseUrl": "http://192.168.1.51:9999/v1",
     "apiKey": "MY_API_KEY",
     "api": "openai-completions",
+    "imageApi": "openai-images",
     "compat": {
       "supportsUsageInStreaming": true,
       "maxTokensField": "max_tokens"
@@ -68,7 +69,7 @@ Create `~/.pi/agent/settings/pi-dynamic-models.json`:
 | `api` | | Pi API type (default: `openai-completions`). See below. |
 | `apiKey` | | Literal key, env var name, `$ENV_VAR`, or `!shell-command`. Omit for open servers. |
 | `compat` | | OpenAI compat overrides applied to every chat model. See below. |
-| `imageApi` | | Image-generation API implementation. Set to `openrouter-images` only when the endpoint accepts OpenRouter's chat-completions image format. OpenRouter URLs enable it automatically. |
+| `imageApi` | | `openai-images` for `/images/generations`, or `openrouter-images` for chat-completions image output. OpenRouter URLs enable `openrouter-images` automatically. |
 | `modelsSource` | | Optional model catalog endpoint + JSON paths (`url`, `itemsPath`, `idPath`, `namePath`). Defaults to GET `{baseUrl}/models` and `data` when omitted; architecture metadata is read from each model's `architecture` object. |
 | `models` | | Per-model metadata keyed by model ID. Overrides defaults for discovered models. Models listed here but not returned by the server are still registered. |
 
@@ -83,7 +84,7 @@ Create `~/.pi/agent/settings/pi-dynamic-models.json`:
 | `maxTokens` | number | `16384` |
 | `architecture.input_modalities` | string[] | From catalog metadata; supported values map to Pi's `input` field. |
 | `architecture.output_modalities` | string[] | From catalog metadata; selects chat, image, and classifier registrations. |
-| `imageApi` | `"openrouter-images"` | Inherits the provider setting; otherwise the image operation is not registered. |
+| `imageApi` | `"openrouter-images"` or `"openai-images"` | Inherits the provider setting; otherwise the image operation is not registered. |
 
 Explicit `models` register immediately. Catalog discovery runs in the background after the session starts; if a source fails, configured models remain available and providers without fallbacks are skipped.
 
@@ -96,18 +97,35 @@ outputs map to Pi operations: `text` → chat, `image` → image, and
 `decisions` → classifier through Pi's TypeSafe System One handler. One model
 may register multiple operations under the same ID.
 
-For a direct `openrouter.ai` base URL, discovery fetches the normal model list
+OpenRouter image and decision catalogs refresh automatically at session startup,
+using Pi's existing OpenRouter provider and credentials. Native chat models,
+streaming APIs, authentication, and known model pricing stay intact. No static
+image list or image-specific cache is maintained. `/image-model` from
+[pi-image-gen](https://github.com/ssweens/pi-image-gen) consumes these registered
+image models; scripts use `models.getAvailableOfType("image")` or
+`models.getAvailableOfType("classifier")`.
+
+If OpenRouter is explicitly configured in this extension, that configuration
+owns its full catalog instead. For a direct `openrouter.ai` base URL, discovery fetches the normal model list
 plus `output_modalities=image` and `output_modalities=decisions`; those
 operation-only models are absent from the default listing. A custom
 `modelsSource` is used as-is, so include the architecture fields or query
 `output_modalities=all` there.
 
 Pi has no audio, embedding, rerank, transcription, or video model operation.
-Those outputs are not registered as chat. Non-OpenRouter image endpoints must
-set `imageApi: "openrouter-images"` only if they accept OpenRouter's
-`/chat/completions` image request format; otherwise the image model is omitted
-and the startup widget says why. Unsupported input modalities are likewise not
-advertised as Pi text/image inputs.
+Those outputs are not registered as chat. Corral and other servers exposing
+`/images/generations` set `imageApi: "openai-images"`. That adapter accepts text
+prompts and requests base64 PNG responses; image editing is not advertised.
+Endpoints accepting OpenRouter's chat-completions image format use
+`imageApi: "openrouter-images"`. Without a supported image API, image operations
+are omitted and the startup widget says why. Unsupported input modalities are
+not advertised as Pi text/image inputs. Model names never determine capabilities.
+
+Corral catalog records use the same `architecture` shape. Both `/v1/models` and
+`/corral/models` can supply it; Corral details supplement a missing architecture
+and context size. `output_modalities: ["decisions"]` registers a classifier
+through the System One handler at `{baseUrl}/systemone`, without a per-model
+client override.
 
 ### Supported API types
 

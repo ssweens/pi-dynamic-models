@@ -33,7 +33,7 @@
  *   baseUrl   (required) Server URL including /v1 if needed
  *   apiKey    (optional) Literal key, env var name, or !shell-command
  *   api       (optional) Chat API type; defaults to "openai-completions"
- *   imageApi  (optional) "openrouter-images" when the endpoint supports that wire format
+ *   imageApi  (optional) "openai-images" for /images/generations, "openrouter-images" for chat image output
  *   compat    (optional) OpenAI-completions compat overrides (see OpenAICompat)
  *   models    (optional) Per-model metadata keyed by model ID; overrides discovered metadata
  *
@@ -49,13 +49,16 @@
 
 import type { AnyModel } from "@earendil-works/pi-ai";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import type { ExtensionAPI, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import { exec } from "node:child_process";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
+import { openAIImagesApi } from "./image-api.js";
+
+type DynamicImageApi = "openrouter-images" | "openai-images";
 
 // Locate the active pi-ai package across managed releases, global installs, and Jiti's CJS resolver.
 function resolvePiAiDirectory(): string {
@@ -187,7 +190,7 @@ interface ModelOverride {
   contextWindow?: number;
   maxTokens?: number;
   architecture?: ModelArchitecture;
-  imageApi?: "openrouter-images";
+  imageApi?: DynamicImageApi;
 }
 
 interface ModelSourceConfig {
@@ -203,7 +206,7 @@ interface ServerConfig {
   apiKey?: string;
   api?: string;
   compat?: OpenAICompat;
-  imageApi?: "openrouter-images";
+  imageApi?: DynamicImageApi;
   modelsSource?: ModelSourceConfig;
   models?: Record<string, ModelOverride>;
 }
@@ -218,6 +221,7 @@ interface DiscoveredModel {
 interface CorralModelDetail {
   id: string;
   context_size: number | null;
+  architecture?: ModelArchitecture;
   hf_base?: string | null;
   aliases?: string[];
   unlisted?: boolean;
@@ -504,8 +508,8 @@ function supportedInputs(values: unknown): ("text" | "image")[] {
   )));
 }
 
-export function resolveImageApi(baseUrl: string, configured?: string): "openrouter-images" | undefined {
-  if (configured === "openrouter-images") return configured;
+export function resolveImageApi(baseUrl: string, configured?: string): DynamicImageApi | undefined {
+  if (configured === "openrouter-images" || configured === "openai-images") return configured;
   try {
     if (new URL(baseUrl).hostname === "openrouter.ai") return "openrouter-images";
   } catch {
@@ -540,7 +544,10 @@ export function buildModelEntries(options: {
   for (const id of options.ids) {
     const override = options.overrides?.[id];
     const discovered = options.discoveredById.get(id);
-    const architecture = resolveArchitecture(discovered, override);
+    const architecture = resolveArchitecture({
+      id,
+      architecture: { ...options.corralDetails.get(id)?.architecture, ...discovered?.architecture },
+    }, override);
     for (const modality of architecture?.input_modalities ?? []) {
       if (modality !== "text" && modality !== "image") unsupportedInputs.add(modality);
     }
@@ -579,12 +586,12 @@ export function buildModelEntries(options: {
 
     if (outputs.includes("image")) {
       const imageApi = override?.imageApi ?? options.imageApi;
-      if (imageApi === "openrouter-images" && inputs.length > 0) {
+      if ((imageApi === "openrouter-images" || imageApi === "openai-images") && inputs.includes("text")) {
         models.push({
           ...common,
           type: "image",
           api: imageApi,
-          input: inputs,
+          input: imageApi === "openai-images" ? ["text"] : inputs,
           output: outputs.filter((value): value is "text" | "image" =>
             value === "text" || value === "image"
           ),
@@ -622,9 +629,14 @@ export function buildModelEntries(options: {
 
 export function buildOperationHandlers(models: AnyModel[]) {
   return {
-    ...(openrouterImagesApi && models.some((model) => model.type === "image")
-      ? { images: { "openrouter-images": openrouterImagesApi() } }
-      : {}),
+    ...(models.some((model) => model.type === "image") ? {
+      images: {
+        ...(openrouterImagesApi && models.some((model) => model.type === "image" && model.api === "openrouter-images")
+          ? { "openrouter-images": openrouterImagesApi() } : {}),
+        ...(models.some((model) => model.type === "image" && model.api === "openai-images")
+          ? { "openai-images": openAIImagesApi() } : {}),
+      },
+    } : {}),
     ...(typesafeSystemOneApi && models.some((model) => model.type === "classifier")
       ? { classifiers: { "typesafe-system-one": typesafeSystemOneApi() } }
       : {}),
@@ -658,7 +670,7 @@ export function formatStartupSummary(summary: StartupSummary): string[] {
   const unsupported: string[] = [];
   if (summary.unsupportedModels > 0) unsupported.push(`unsupported models: ${summary.unsupportedModels}`);
   if (summary.skippedImageModels > 0) {
-    unsupported.push(`images requiring imageApi "openrouter-images": ${summary.skippedImageModels}`);
+    unsupported.push(`images requiring a supported imageApi: ${summary.skippedImageModels}`);
   }
   if (unsupported.length > 0) lines.push(`[pi-dynamic-models] ${unsupported.join("; ")}`);
   return lines;
@@ -785,9 +797,53 @@ async function hydrateProvider(pi: ExtensionAPI, server: ServerConfig, run: Disc
   registerProviderModels(pi, server, resolvedApiKey, fetchedModels, corralDetails);
 }
 
+/** Refresh operation-only catalogs without replacing native chat metadata or authentication. */
+export async function hydrateOpenRouter(
+  pi: ExtensionAPI,
+  ctx: Pick<ExtensionContext, "modelRegistry">,
+  signal?: AbortSignal,
+): Promise<void> {
+  const native = ctx.modelRegistry.getProvider("openrouter");
+  const baseUrl = native?.baseUrl;
+  if (!baseUrl || new URL(baseUrl).hostname !== "openrouter.ai") return;
+
+  const discovery = await fetchModelsFromSources(buildModelSources(baseUrl).slice(1), undefined, fetch, signal);
+  if (signal?.aborted) return;
+  // Keep the existing operations on partial catalog failures rather than silently removing them.
+  if (discovery.warnings.length) throw new Error(discovery.warnings.join("; "));
+
+  const registration = buildModelEntries({
+    ids: discovery.models.map((model) => model.id),
+    provider: "openrouter", baseUrl, api: "openai-completions", imageApi: "openrouter-images",
+    discoveredById: new Map(discovery.models.map((model) => [model.id, model])),
+    corralDetails: new Map(),
+  });
+  const operations = registration.models.filter((model) => model.type === "image" || model.type === "classifier");
+  pi.registerProvider({
+    ...native,
+    getModels: () => native.getModels(),
+    getAllModels: () => {
+      const current = native.getAllModels?.() ?? native.getModels();
+      return [
+        ...current.filter((model) => !model.type || model.type === "chat"),
+        ...operations.map((model) => {
+          const previous = current.find((old) => old.type === model.type && old.id === model.id);
+          if (model.type === "image") return {
+            ...model, ...(previous?.type === "image" ? previous : {}),
+            api: model.api, input: model.input, output: model.output,
+          };
+          return {
+            ...model, ...(previous?.type === "classifier" ? previous : {}),
+            api: model.api, input: model.input,
+          };
+        }),
+      ];
+    },
+  });
+}
+
 export default function (pi: ExtensionAPI): void {
   const servers = loadConfig();
-  if (servers.length === 0) return;
 
   // Explicit models stay available immediately without waiting for any network calls.
   for (const server of servers) {
@@ -809,6 +865,15 @@ export default function (pi: ExtensionAPI): void {
     updateStartupWidget(run);
 
     // Do not return or await this work: providers hydrate independently as discovery completes.
+    if (!servers.some((server) => server.provider === "openrouter")) {
+      void hydrateOpenRouter(pi, ctx, run.controller.signal).catch((error) => {
+        if (!run.controller.signal.aborted) {
+          run.summary.unavailableSources++;
+          updateStartupWidget(run);
+          console.error(`[pi-dynamic-models] OpenRouter discovery failed: ${error}`);
+        }
+      });
+    }
     for (const server of servers) {
       void hydrateProvider(pi, server, run).catch((error) => {
         if (!run.controller.signal.aborted) {

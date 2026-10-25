@@ -10,6 +10,7 @@ import dynamicModels, {
   buildOperationHandlers,
   fetchModelsFromSources,
   formatStartupSummary,
+  hydrateOpenRouter,
   resolveImageApi,
 } from "./index.ts";
 
@@ -22,7 +23,7 @@ type TestOverride = {
   contextWindow?: number;
   maxTokens?: number;
   architecture?: { input_modalities?: string[]; output_modalities?: string[] };
-  imageApi?: "openrouter-images";
+  imageApi?: "openrouter-images" | "openai-images";
 };
 
 function buildEntries(
@@ -68,7 +69,7 @@ describe("startup summary", () => {
       skippedImageModels: 1,
     })).toEqual([
       '[pi-dynamic-models] unavailable model sources: 3; configured fallback providers: 1; skipped providers: 1',
-      '[pi-dynamic-models] unsupported models: 3; images requiring imageApi "openrouter-images": 1',
+      '[pi-dynamic-models] unsupported models: 3; images requiring a supported imageApi: 1',
     ]);
   });
 });
@@ -141,7 +142,7 @@ describe("background provider hydration", () => {
       const ui = { setWidget: () => {} };
       const start = handlers.get("session_start");
       expect(start).toBeDefined();
-      expect(start?.({ type: "session_start", reason: "startup" }, { ui })).toBeUndefined();
+      expect(start?.({ type: "session_start", reason: "startup" }, { ui, modelRegistry: { getProvider: () => undefined } })).toBeUndefined();
       expect(fetchCount).toBe(0);
 
       let timeout: ReturnType<typeof setTimeout> | undefined;
