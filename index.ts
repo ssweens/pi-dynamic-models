@@ -48,7 +48,12 @@
  * configured models are omitted without any startup message.
  */
 
-import type { AnyModel } from "@earendil-works/pi-ai";
+import type { AnyModel, ModelCost } from "@earendil-works/pi-ai";
+import {
+  openRouterCost,
+  type OpenRouterPricing,
+  type OpenRouterPricingOverride,
+} from "@earendil-works/pi-ai/providers/openrouter-api";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI, ExtensionContext, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import { exec } from "node:child_process";
@@ -217,6 +222,7 @@ interface DiscoveredModel {
   name?: string;
   contextWindow?: number;
   maxTokens?: number;
+  cost?: ModelCost;
   architecture?: ModelArchitecture;
   catalogMetadata?: Record<string, unknown>[];
 }
@@ -303,6 +309,78 @@ function toPositiveInteger(value: unknown): number | undefined {
     : undefined;
 }
 
+function isOpenRouterCatalog(url: string): boolean {
+  try {
+    const hostname = new URL(url).hostname;
+    return hostname === "openrouter.ai" || hostname.endsWith(".openrouter.ai");
+  } catch {
+    return false;
+  }
+}
+
+function readOpenRouterRate(value: unknown): string | undefined {
+  if (typeof value !== "string" || value.trim() === "") return undefined;
+  const rate = Number(value);
+  return Number.isFinite(rate) && Number.isFinite(rate * 1_000_000) ? value : undefined;
+}
+
+function readOpenRouterCost(value: unknown): ModelCost | undefined {
+  if (!isRecord(value)) return undefined;
+
+  const prompt = readOpenRouterRate(value.prompt);
+  const completion = readOpenRouterRate(value.completion);
+  const inputCacheRead = readOpenRouterRate(value.input_cache_read);
+  const inputCacheWrite = readOpenRouterRate(value.input_cache_write);
+  const overrides: OpenRouterPricingOverride[] = Array.isArray(value.overrides)
+    ? value.overrides.flatMap((entry) => {
+      if (
+        !isRecord(entry)
+        || entry.utc_start !== undefined
+        || entry.utc_end !== undefined
+        || entry.utc_days !== undefined
+      ) {
+        return [];
+      }
+      const minPromptTokens = toPositiveInteger(entry.min_prompt_tokens);
+      if (minPromptTokens === undefined) return [];
+      const tierPrompt = readOpenRouterRate(entry.prompt);
+      const tierCompletion = readOpenRouterRate(entry.completion);
+      const tierCacheRead = readOpenRouterRate(entry.input_cache_read);
+      const tierCacheWrite = readOpenRouterRate(entry.input_cache_write);
+      if (
+        tierPrompt === undefined
+        && tierCompletion === undefined
+        && tierCacheRead === undefined
+        && tierCacheWrite === undefined
+      ) {
+        return [];
+      }
+      return [{
+        min_prompt_tokens: minPromptTokens,
+        ...(tierPrompt !== undefined ? { prompt: tierPrompt } : {}),
+        ...(tierCompletion !== undefined ? { completion: tierCompletion } : {}),
+        ...(tierCacheRead !== undefined ? { input_cache_read: tierCacheRead } : {}),
+        ...(tierCacheWrite !== undefined ? { input_cache_write: tierCacheWrite } : {}),
+      }];
+    })
+    : [];
+  if (
+    [prompt, completion, inputCacheRead, inputCacheWrite].every((rate) => rate === undefined)
+    && overrides.length === 0
+  ) {
+    return undefined;
+  }
+
+  const pricing: OpenRouterPricing = {
+    ...(prompt !== undefined ? { prompt } : {}),
+    ...(completion !== undefined ? { completion } : {}),
+    ...(inputCacheRead !== undefined ? { input_cache_read: inputCacheRead } : {}),
+    ...(inputCacheWrite !== undefined ? { input_cache_write: inputCacheWrite } : {}),
+    ...(overrides.length > 0 ? { overrides } : {}),
+  };
+  return openRouterCost(pricing);
+}
+
 function readItemsAtPath(value: unknown, path?: string): unknown[] {
   const scoped = getValueAtPath(value, path);
   if (Array.isArray(scoped)) return scoped;
@@ -355,6 +433,7 @@ export function mergeDiscoveredModels(modelLists: readonly DiscoveredModel[][]):
       );
       const contextWindow = previous.contextWindow ?? model.contextWindow;
       const maxTokens = previous.maxTokens ?? model.maxTokens;
+      const cost = previous.cost ?? model.cost;
       const catalogMetadata = [
         ...(previous.catalogMetadata ?? []),
         ...(model.catalogMetadata ?? []),
@@ -364,6 +443,7 @@ export function mergeDiscoveredModels(modelLists: readonly DiscoveredModel[][]):
         name: previous.name && previous.name !== previous.id ? previous.name : model.name ?? previous.name,
         ...(contextWindow !== undefined ? { contextWindow } : {}),
         ...(maxTokens !== undefined ? { maxTokens } : {}),
+        ...(cost ? { cost } : {}),
         ...(inputModalities !== undefined || outputModalities !== undefined
           ? {
             architecture: {
@@ -457,6 +537,7 @@ async function fetchModelsFromSource(
 
   const body: unknown = await response.json();
   const items = readItemsAtPath(body, source.itemsPath);
+  const openRouterCatalog = isOpenRouterCatalog(url);
   const idPath = source.idPath?.trim() || "id";
   const namePath = source.namePath?.trim() || "name";
 
@@ -471,11 +552,13 @@ async function fetchModelsFromSource(
     const maxTokens = toPositiveInteger(getValueAtPath(item, "top_provider.max_completion_tokens"))
       ?? toPositiveInteger(item.max_completion_tokens)
       ?? toPositiveInteger(item.max_tokens);
+    const cost = openRouterCatalog ? readOpenRouterCost(item.pricing) : undefined;
     return [{
       id,
       name: toOptionalString(getValueAtPath(item, namePath))?.trim() || id,
       ...(contextWindow !== undefined ? { contextWindow } : {}),
       ...(maxTokens !== undefined ? { maxTokens } : {}),
+      ...(cost ? { cost } : {}),
       ...(architecture ? { architecture } : {}),
       catalogMetadata: [item],
     }];
@@ -596,7 +679,7 @@ export function buildModelEntries(options: {
       name: override?.name ?? discovered?.name ?? id,
       provider: options.provider,
       baseUrl: options.baseUrl,
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      cost: discovered?.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     };
     let registered = false;
 
@@ -881,8 +964,6 @@ export default function (pi: ExtensionAPI): void {
     if (!servers.some((server) => server.provider === "openrouter")) {
       void hydrateOpenRouter(pi, ctx, run.controller.signal).catch((error) => {
         if (!run.controller.signal.aborted) {
-          run.summary.unavailableSources++;
-          updateStartupWidget(run);
           console.error(`[pi-dynamic-models] OpenRouter discovery failed: ${error}`);
         }
       });

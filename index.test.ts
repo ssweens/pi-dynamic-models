@@ -224,7 +224,18 @@ describe("OpenRouter modality discovery", () => {
           name: "Jev",
           context_length: 262_144,
           top_provider: { context_length: 131_072, max_completion_tokens: 8_192 },
-          pricing: { prompt: "0.00001" },
+          pricing: {
+            prompt: "0.00000008",
+            completion: "0.0000002",
+            input_cache_read: "0.00000002",
+            input_cache_write: "0.0000003",
+            request: "0.01",
+            image: "0.02",
+            overrides: [
+              { min_prompt_tokens: 32_000, prompt: "0.00000004", completion: "0.0000001" },
+              { utc_start: 12, prompt: "0.5" },
+            ],
+          },
           supported_parameters: ["tools"],
           architecture: {
             input_modalities: ["text"],
@@ -251,9 +262,50 @@ describe("OpenRouter modality discovery", () => {
     }]);
     expect(result.models[0].catalogMetadata).toHaveLength(3);
     expect(result.models[0].catalogMetadata?.[0]).toMatchObject({
-      pricing: { prompt: "0.00001" },
+      pricing: { prompt: "0.00000008", request: "0.01", image: "0.02" },
       supported_parameters: ["tools"],
     });
+    const expectedCost = {
+      input: 0.08,
+      output: 0.2,
+      cacheRead: 0.02,
+      cacheWrite: 0.3,
+      tiers: [{ inputTokensAbove: 32_000, input: 0.04, output: 0.1, cacheRead: 0.02, cacheWrite: 0.3 }],
+    };
+    expect(result.models[0].cost).toEqual(expectedCost);
+    const registered = buildModelEntries({
+      ids: ["jev"],
+      provider: "openrouter",
+      baseUrl: "https://openrouter.ai/api/v1",
+      api: "openai-completions",
+      discoveredById: new Map([["jev", result.models[0]]]),
+      corralDetails: new Map(),
+    });
+    expect(registered.models[0].cost).toEqual(expectedCost);
+  });
+
+  test("does not assume other catalogs use OpenRouter token-price units", async () => {
+    const result = await fetchModelsFromSources(
+      [{ url: "https://catalog.example/models" }],
+      undefined,
+      async () => new Response(JSON.stringify({
+        data: [{ id: "custom", pricing: { prompt: "0.00000008", completion: "0.0000002" } }],
+      }), { status: 200, headers: { "Content-Type": "application/json" } }),
+    );
+
+    expect(result.models[0].cost).toBeUndefined();
+    expect(result.models[0].catalogMetadata?.[0]).toMatchObject({
+      pricing: { prompt: "0.00000008", completion: "0.0000002" },
+    });
+    const registered = buildModelEntries({
+      ids: ["custom"],
+      provider: "custom",
+      baseUrl: "https://catalog.example",
+      api: "openai-completions",
+      discoveredById: new Map([["custom", result.models[0]]]),
+      corralDetails: new Map(),
+    });
+    expect(registered.models[0].cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
   });
 
   test("normalizes OpenRouter and oMLX context and completion limits", async () => {

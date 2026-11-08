@@ -117,9 +117,14 @@ Catalog context metadata maps to Pi's `contextWindow`: OpenRouter's
 `max_model_len` are recognized. Context precedence is configured
 `models.<id>.contextWindow`, Corral `context_size`, catalog metadata, then
 `128000`. OpenRouter's `top_provider.max_completion_tokens` also sets Pi's
-`maxTokens`; configured `models.<id>.maxTokens` takes precedence. Full raw
-catalog records are retained in discovery results for future metadata use;
-only recognized fields affect registered Pi models today.
+`maxTokens`; configured `models.<id>.maxTokens` takes precedence. OpenRouter
+`pricing` fields are converted with Pi-AI's `openRouterCost()` helper into Pi's
+USD-per-million-token rates, including cache rates and prompt-length tiers.
+Request/image fees and time-based price overrides are not representable in
+Pi's per-token cost model. Pricing is mapped only for OpenRouter hosts; other
+catalogs keep the zero-cost fallback unless a known pricing contract is added.
+Full raw catalog records are retained in discovery results for future metadata
+use; only recognized fields affect registered Pi models today.
 
 Pi has no audio, embedding, rerank, transcription, or video model operation.
 Those outputs are not registered as chat. Corral and other servers exposing

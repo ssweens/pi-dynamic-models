@@ -7,6 +7,7 @@ All notable changes to this project will be documented in this file.
 - Model discovery now starts after session start and never blocks Pi startup. Explicit fallback models register immediately; discovered catalogs and Corral context sizes hydrate providers asynchronously.
 
 ### Added
+- Map OpenRouter per-token prompt, completion, and cache prices into Pi cost rates via Pi-AI's `openRouterCost()` helper, including supported prompt-length tiers.
 - Normalize catalog context windows from OpenRouter `context_length` / `top_provider.context_length` and oMLX `max_model_len`; use OpenRouter `top_provider.max_completion_tokens` as the discovered output limit.
 - Retain full raw catalog records in discovery results for future metadata use.
 - Preserved OpenRouter-style architecture modalities during dynamic discovery and registered `text` as chat, `image` as an image operation when its API is configured, and `decisions` as a Pi classifier through TypeSafe System One.
