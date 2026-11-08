@@ -49,10 +49,9 @@
  */
 
 import type { AnyModel, ModelCost } from "@earendil-works/pi-ai";
-import {
-  openRouterCost,
-  type OpenRouterPricing,
-  type OpenRouterPricingOverride,
+import type {
+  OpenRouterPricing,
+  OpenRouterPricingOverride,
 } from "@earendil-works/pi-ai/providers/openrouter-api";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI, ExtensionContext, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
@@ -120,6 +119,15 @@ const loadOptionalApi = async (name: string) => {
   const url = apiUrl(name);
   return existsSync(fileURLToPath(url)) ? import(url.href) : {};
 };
+const providerExport = aiPackage.exports!["./providers/*"].import;
+const providerUrl = new URL(
+  providerExport.replace("*", "openrouter-api"),
+  pathToFileURL(join(aiDirectory, "package.json")),
+);
+if (!existsSync(fileURLToPath(providerUrl))) {
+  throw new Error("The installed pi-ai package does not provide the OpenRouter pricing API.");
+}
+const { openRouterCost } = await import(providerUrl.href);
 const { openrouterImagesApi } = await loadOptionalApi("openrouter-images.lazy");
 const { typesafeSystemOneApi } = await loadOptionalApi("typesafe-system-one.lazy");
 
