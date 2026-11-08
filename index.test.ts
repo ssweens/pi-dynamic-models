@@ -29,9 +29,15 @@ function buildEntries(
   models: Array<{
     id: string;
     name?: string;
+    contextWindow?: number;
+    maxTokens?: number;
     architecture?: { input_modalities?: string[]; output_modalities?: string[] };
   }>,
-  options: { imageApi?: string; overrides?: Record<string, TestOverride> } = {},
+  options: {
+    imageApi?: string;
+    overrides?: Record<string, TestOverride>;
+    corralDetails?: Map<string, { id: string; context_size: number | null }>;
+  } = {},
 ) {
   const discoveredById = new Map(models.map((model) => [model.id, model] as const));
   return buildModelEntries({
@@ -42,32 +48,26 @@ function buildEntries(
     imageApi: options.imageApi,
     discoveredById,
     overrides: options.overrides,
-    corralDetails: emptyCorralDetails(),
+    corralDetails: options.corralDetails ?? emptyCorralDetails(),
   });
 }
 
 describe("startup summary", () => {
   test("stays quiet when registration has no issues", () => {
     expect(formatStartupSummary({
-      unavailableSources: 0,
-      configuredFallbackProviders: 0,
-      skippedProviders: 0,
       emptyProviders: 0,
       unsupportedModels: 0,
       skippedImageModels: 0,
     })).toEqual([]);
   });
 
-  test("aggregates startup issues into one concise line", () => {
+  test("aggregates actionable startup issues into concise lines", () => {
     expect(formatStartupSummary({
-      unavailableSources: 3,
-      configuredFallbackProviders: 1,
-      skippedProviders: 1,
-      emptyProviders: 0,
+      emptyProviders: 1,
       unsupportedModels: 3,
       skippedImageModels: 1,
     })).toEqual([
-      '[pi-dynamic-models] unavailable model sources: 3; configured fallback providers: 1; skipped providers: 1',
+      '[pi-dynamic-models] Providers with no models: 1',
       '[pi-dynamic-models] unsupported models: 3; images requiring imageApi "openrouter-images": 1',
     ]);
   });
@@ -118,10 +118,19 @@ describe("background provider hydration", () => {
           baseUrl: "http://slow.test/v1",
           apiKey: "none",
         },
+        {
+          provider: "offline",
+          baseUrl: "https://openrouter.ai/api/v1",
+          apiKey: "sk-or-test",
+        },
       ]));
       globalThis.fetch = (async (input, init) => {
         fetchCount++;
         const url = new URL(String(input));
+        if (url.hostname === "openrouter.ai") {
+          // Unreachable the way offline DNS fails; must stay invisible to the user.
+          throw new TypeError("fetch failed");
+        }
         if (url.hostname === "slow.test") {
           return new Promise<Response>((_resolve, reject) => {
             const signal = init?.signal;
@@ -138,7 +147,8 @@ describe("background provider hydration", () => {
       expect(registrations.map(({ provider }) => provider)).toEqual(["fast"]);
       expect(registrations[0].models.map((model) => model.id)).toEqual(["manual"]);
 
-      const ui = { setWidget: () => {} };
+      const widgetStates: boolean[] = [];
+      const ui = { setWidget: (_id: string, content: unknown) => { widgetStates.push(content !== undefined); } };
       const start = handlers.get("session_start");
       expect(start).toBeDefined();
       expect(start?.({ type: "session_start", reason: "startup" }, { ui })).toBeUndefined();
@@ -161,6 +171,11 @@ describe("background provider hydration", () => {
       );
       expect(hydrated?.models.map((model) => model.id)).toEqual(["from-catalog", "manual"]);
       expect(registrations.some(({ provider }) => provider === "slow")).toBe(false);
+
+      // Unreachable OpenRouter must skip its provider silently: no registration, no widget content.
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      expect(registrations.some(({ provider }) => provider === "offline")).toBe(false);
+      expect(widgetStates.filter((hasContent) => hasContent)).toEqual([]);
     } finally {
       handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "quit" }, {});
       await new Promise((resolve) => setTimeout(resolve, 0));
@@ -198,7 +213,7 @@ describe("OpenRouter modality discovery", () => {
     expect(buildModelSources("https://openrouter.ai/api/v1", configured)).toEqual([configured]);
   });
 
-  test("merges architecture modalities across OpenRouter listings", async () => {
+  test("merges modality listings and retains every raw catalog record", async () => {
     const fetcher: typeof fetch = async (input) => {
       const url = new URL(String(input));
       const output = url.searchParams.get("output_modalities") ?? "text";
@@ -206,6 +221,10 @@ describe("OpenRouter modality discovery", () => {
         data: [{
           id: "jev",
           name: "Jev",
+          context_length: 262_144,
+          top_provider: { context_length: 131_072, max_completion_tokens: 8_192 },
+          pricing: { prompt: "0.00001" },
+          supported_parameters: ["tools"],
           architecture: {
             input_modalities: ["text"],
             output_modalities: [output],
@@ -219,14 +238,68 @@ describe("OpenRouter modality discovery", () => {
       fetcher,
     );
     expect(result.warnings).toEqual([]);
-    expect(result.models).toEqual([{
+    expect(result.models).toMatchObject([{
       id: "jev",
       name: "Jev",
+      contextWindow: 262_144,
+      maxTokens: 8_192,
       architecture: {
         input_modalities: ["text"],
         output_modalities: ["text", "image", "decisions"],
       },
     }]);
+    expect(result.models[0].catalogMetadata).toHaveLength(3);
+    expect(result.models[0].catalogMetadata?.[0]).toMatchObject({
+      pricing: { prompt: "0.00001" },
+      supported_parameters: ["tools"],
+    });
+  });
+
+  test("normalizes OpenRouter and oMLX context and completion limits", async () => {
+    const result = await fetchModelsFromSources(
+      [
+        { url: "https://openrouter.test/models" },
+        { url: "https://omlx.test/v1/models" },
+      ],
+      undefined,
+      async (input) => {
+        const host = new URL(String(input)).hostname;
+        const data = host === "openrouter.test"
+          ? [{
+            id: "or/model",
+            context_length: 262_144,
+            top_provider: { context_length: 131_072, max_completion_tokens: 8_192 },
+          }]
+          : [{ id: "local-model", max_model_len: 262_128, owned_by: "omlx" }];
+        return new Response(JSON.stringify({ object: "list", data }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      },
+    );
+
+    expect(result.models).toMatchObject([
+      { id: "or/model", contextWindow: 262_144, maxTokens: 8_192 },
+      { id: "local-model", contextWindow: 262_128 },
+    ]);
+    expect(result.models.find((model) => model.id === "local-model")?.catalogMetadata?.[0])
+      .toMatchObject({ owned_by: "omlx", max_model_len: 262_128 });
+  });
+
+  test("configured and Corral context limits precede catalog fallback", () => {
+    const model = { id: "model", contextWindow: 262_144, maxTokens: 8_192 };
+    const corralDetails = new Map([[
+      "model",
+      { id: "model", context_size: 131_072 },
+    ]]);
+    const corral = buildEntries([model], { corralDetails });
+    expect(corral.models[0]).toMatchObject({ contextWindow: 131_072, maxTokens: 8_192 });
+
+    const configured = buildEntries([model], {
+      corralDetails,
+      overrides: { model: { contextWindow: 65_536, maxTokens: 4_096 } },
+    });
+    expect(configured.models[0]).toMatchObject({ contextWindow: 65_536, maxTokens: 4_096 });
   });
 
   test("catalog JSON paths still work and retain architecture", async () => {

@@ -7,10 +7,13 @@ All notable changes to this project will be documented in this file.
 - Model discovery now starts after session start and never blocks Pi startup. Explicit fallback models register immediately; discovered catalogs and Corral context sizes hydrate providers asynchronously.
 
 ### Added
+- Normalize catalog context windows from OpenRouter `context_length` / `top_provider.context_length` and oMLX `max_model_len`; use OpenRouter `top_provider.max_completion_tokens` as the discovered output limit.
+- Retain full raw catalog records in discovery results for future metadata use.
 - Preserved OpenRouter-style architecture modalities during dynamic discovery and registered `text` as chat, `image` as an image operation when its API is configured, and `decisions` as a Pi classifier through TypeSafe System One.
 - Direct OpenRouter discovery now queries the default, image, and decision catalogs; unsupported modality-only models are not mislabeled as chat.
 
 ### Fixed
+- Unreachable model catalogs (for example OpenRouter being offline) no longer print a startup widget message; the provider is skipped silently and explicitly configured models remain available.
 - Added configurable model-source support so providers can fetch models from arbitrary catalog endpoints with JSON paths for item arrays and model ids/names.
 - Added ClinePass support via `https://api.cline.bot/api/v1/ai/cline/recommended-models` and `clinePass` item-path mapping.
 - Resolved provider `apiKey` values inside `pi-dynamic-models` before startup fetches and provider registration, so raw env var names and `$ENV_VAR` / `${ENV_VAR}` references now work as intended.

@@ -85,7 +85,7 @@ Create `~/.pi/agent/settings/pi-dynamic-models.json`:
 | `architecture.output_modalities` | string[] | From catalog metadata; selects chat, image, and classifier registrations. |
 | `imageApi` | `"openrouter-images"` | Inherits the provider setting; otherwise the image operation is not registered. |
 
-Explicit `models` register immediately. Catalog discovery runs in the background after the session starts; if a source fails, configured models remain available and providers without fallbacks are skipped.
+Explicit `models` register immediately. Catalog discovery runs in the background after the session starts; if a source is unreachable it fails silently: configured models remain available, providers without fallbacks are skipped, and nothing is printed. The startup widget only reports issues you can fix in the config (empty catalogs, unsupported modalities).
 
 ### OpenRouter modality metadata
 
@@ -101,6 +101,15 @@ plus `output_modalities=image` and `output_modalities=decisions`; those
 operation-only models are absent from the default listing. A custom
 `modelsSource` is used as-is, so include the architecture fields or query
 `output_modalities=all` there.
+
+Catalog context metadata maps to Pi's `contextWindow`: OpenRouter's
+`context_length` (falling back to `top_provider.context_length`) and oMLX's
+`max_model_len` are recognized. Context precedence is configured
+`models.<id>.contextWindow`, Corral `context_size`, catalog metadata, then
+`128000`. OpenRouter's `top_provider.max_completion_tokens` also sets Pi's
+`maxTokens`; configured `models.<id>.maxTokens` takes precedence. Full raw
+catalog records are retained in discovery results for future metadata use;
+only recognized fields affect registered Pi models today.
 
 Pi has no audio, embedding, rerank, transcription, or video model operation.
 Those outputs are not registered as chat. Non-OpenRouter image endpoints must
@@ -185,4 +194,4 @@ override can use the same OpenRouter field names:
 
 **Token counting or field errors**: Add the appropriate `compat` settings for your server.
 
-**`contextWindow` stays at 128000**: `pi-dynamic-models` uses corral's `/corral/models` `context_size` when available. If your server reports `context_size: null` for a model, the extension falls back to `128000` unless you set `models.<id>.contextWindow` explicitly.
+**`contextWindow` stays at 128000**: Check whether the catalog advertises `context_length`, `top_provider.context_length`, or `max_model_len`, and whether Corral returns a non-null `context_size`. Explicit `models.<id>.contextWindow` overrides all discovered values.

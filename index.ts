@@ -38,13 +38,14 @@
  *   models    (optional) Per-model metadata keyed by model ID; overrides discovered metadata
  *
  * Discovery + registration logic:
- *   1. Read OpenRouter-style architecture modalities from discovered model records.
+ *   1. Retain raw catalog records and normalize names, modalities, context windows, and output limits.
  *   2. OpenRouter defaults fetch the text, image, and decision listings and merge by model ID.
  *   3. Register text as chat, image through its configured API, and decisions as System One classifiers.
  *      Unsupported output types are never silently registered as chat.
  *
- * Explicit models register before discovery. Unreachable sources leave those
- * fallbacks available; providers without configured models are skipped.
+ * Explicit models register before discovery. Unreachable sources are skipped
+ * silently: configured fallbacks remain available, and providers without
+ * configured models are omitted without any startup message.
  */
 
 import type { AnyModel } from "@earendil-works/pi-ai";
@@ -211,7 +212,10 @@ interface ServerConfig {
 interface DiscoveredModel {
   id: string;
   name?: string;
+  contextWindow?: number;
+  maxTokens?: number;
   architecture?: ModelArchitecture;
+  catalogMetadata?: Record<string, unknown>[];
 }
 
 /** Shape returned by GET {baseUrl}/corral/models */
@@ -289,6 +293,12 @@ function toOptionalString(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
 }
 
+function toPositiveInteger(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0
+    ? value
+    : undefined;
+}
+
 function readItemsAtPath(value: unknown, path?: string): unknown[] {
   const scoped = getValueAtPath(value, path);
   if (Array.isArray(scoped)) return scoped;
@@ -339,9 +349,17 @@ export function mergeDiscoveredModels(modelLists: readonly DiscoveredModel[][]):
         previous.architecture?.output_modalities,
         model.architecture?.output_modalities,
       );
+      const contextWindow = previous.contextWindow ?? model.contextWindow;
+      const maxTokens = previous.maxTokens ?? model.maxTokens;
+      const catalogMetadata = [
+        ...(previous.catalogMetadata ?? []),
+        ...(model.catalogMetadata ?? []),
+      ];
       merged.set(model.id, {
         id: model.id,
         name: previous.name && previous.name !== previous.id ? previous.name : model.name ?? previous.name,
+        ...(contextWindow !== undefined ? { contextWindow } : {}),
+        ...(maxTokens !== undefined ? { maxTokens } : {}),
         ...(inputModalities !== undefined || outputModalities !== undefined
           ? {
             architecture: {
@@ -350,6 +368,7 @@ export function mergeDiscoveredModels(modelLists: readonly DiscoveredModel[][]):
             },
           }
           : {}),
+        ...(catalogMetadata.length > 0 ? { catalogMetadata } : {}),
       });
     }
   }
@@ -442,10 +461,19 @@ async function fetchModelsFromSource(
     const id = toOptionalString(getValueAtPath(item, idPath))?.trim();
     if (!id) return [];
     const architecture = readArchitecture(item.architecture);
+    const contextWindow = toPositiveInteger(item.context_length)
+      ?? toPositiveInteger(getValueAtPath(item, "top_provider.context_length"))
+      ?? toPositiveInteger(item.max_model_len);
+    const maxTokens = toPositiveInteger(getValueAtPath(item, "top_provider.max_completion_tokens"))
+      ?? toPositiveInteger(item.max_completion_tokens)
+      ?? toPositiveInteger(item.max_tokens);
     return [{
       id,
       name: toOptionalString(getValueAtPath(item, namePath))?.trim() || id,
+      ...(contextWindow !== undefined ? { contextWindow } : {}),
+      ...(maxTokens !== undefined ? { maxTokens } : {}),
       ...(architecture ? { architecture } : {}),
+      catalogMetadata: [item],
     }];
   });
 }
@@ -551,8 +579,10 @@ export function buildModelEntries(options: {
       }
     }
     const inputs = supportedInputs(override?.input ?? architecture?.input_modalities);
+    // Keep Corral's server-specific limit precedence; catalog limits cover other APIs.
     const contextWindow = override?.contextWindow
       ?? options.corralDetails.get(id)?.context_size
+      ?? discovered?.contextWindow
       ?? 128_000;
     const common = {
       id,
@@ -571,7 +601,7 @@ export function buildModelEntries(options: {
         reasoning: override?.reasoning ?? false,
         input: inputs,
         contextWindow,
-        maxTokens: override?.maxTokens ?? 16_384,
+        maxTokens: override?.maxTokens ?? discovered?.maxTokens ?? 16_384,
         ...(options.compat ? { compat: options.compat } : {}),
       });
       registered = true;
@@ -631,10 +661,9 @@ export function buildOperationHandlers(models: AnyModel[]) {
   };
 }
 
+// Unreachable catalogs are transient and never surfaced; the summary reports
+// only startup issues that are fixed by editing the config or the server.
 interface StartupSummary {
-  unavailableSources: number;
-  configuredFallbackProviders: number;
-  skippedProviders: number;
   emptyProviders: number;
   unsupportedModels: number;
   skippedImageModels: number;
@@ -642,16 +671,6 @@ interface StartupSummary {
 
 export function formatStartupSummary(summary: StartupSummary): string[] {
   const lines: string[] = [];
-  const discovery: string[] = [];
-  if (summary.unavailableSources > 0) {
-    discovery.push(`unavailable model sources: ${summary.unavailableSources}`);
-    if (summary.configuredFallbackProviders > 0) {
-      discovery.push(`configured fallback providers: ${summary.configuredFallbackProviders}`);
-    }
-    if (summary.skippedProviders > 0) discovery.push(`skipped providers: ${summary.skippedProviders}`);
-  }
-  if (discovery.length > 0) lines.push(`[pi-dynamic-models] ${discovery.join("; ")}`);
-
   if (summary.emptyProviders > 0) {
     lines.push(`[pi-dynamic-models] Providers with no models: ${summary.emptyProviders}`);
   }
@@ -666,9 +685,6 @@ export function formatStartupSummary(summary: StartupSummary): string[] {
 
 function createStartupSummary(): StartupSummary {
   return {
-    unavailableSources: 0,
-    configuredFallbackProviders: 0,
-    skippedProviders: 0,
     emptyProviders: 0,
     unsupportedModels: 0,
     skippedImageModels: 0,
@@ -750,19 +766,11 @@ async function hydrateProvider(pi: ExtensionAPI, server: ServerConfig, run: Disc
   const sources = buildModelSources(normalizedBaseUrl, server.modelsSource);
   let fetchedModels: DiscoveredModel[] = [];
   try {
-    const discovery = await fetchModelsFromSources(sources, resolvedApiKey, fetch, signal);
-    fetchedModels = discovery.models;
-    run.summary.unavailableSources += discovery.warnings.length;
+    fetchedModels = (await fetchModelsFromSources(sources, resolvedApiKey, fetch, signal)).models;
   } catch {
     if (signal.aborted) return;
-    run.summary.unavailableSources += sources.length;
-    if (Object.keys(server.models ?? {}).length > 0) {
-      run.summary.configuredFallbackProviders++;
-    } else {
-      run.summary.skippedProviders++;
-      updateStartupWidget(run);
-      return;
-    }
+    // Unreachable catalogs stay silent: explicit models still register; otherwise skip the provider.
+    if (Object.keys(server.models ?? {}).length === 0) return;
   }
 
   if (signal.aborted) return;
