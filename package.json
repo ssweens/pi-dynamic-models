@@ -10,18 +10,19 @@
     "test": "bun test"
   },
   "peerDependencies": {
-    "@earendil-works/pi-ai": "*",
-    "@earendil-works/pi-coding-agent": "*"
+    "@earendil-works/pi-ai": ">=1.4.0",
+    "@earendil-works/pi-coding-agent": ">=1.4.0"
   },
   "devDependencies": {
-    "@earendil-works/pi-ai": "0.99.1",
-    "@earendil-works/pi-coding-agent": "0.99.1"
+    "@earendil-works/pi-ai": "1.4.0",
+    "@earendil-works/pi-coding-agent": "1.4.0"
   },
   "pi": {
     "extensions": ["./index.ts"]
   },
   "files": [
     "index.ts",
+    "image-api.ts",
     "README.md",
     "CHANGELOG.md",
     "LICENSE"
